@@ -8,34 +8,34 @@ sleep 2
 
 # Test root
 echo "Testing /"
-curl -s http://localhost:8001/ | grep "Hello World"
+curl -s http://localhost:8001/ | grep "Welcome to NimFastAPI"
 if [ $? -eq 0 ]; then echo "Root Success"; else echo "Root Failed"; kill $SERVER_PID; exit 1; fi
 
-# Test path and query parameter
-echo "Testing /items/42?q=nim"
-curl -s "http://localhost:8001/items/42?q=nim" | grep '"item_id":42' | grep '"q":"nim"'
-if [ $? -eq 0 ]; then echo "Path/Query Success"; else echo "Path/Query Failed"; kill $SERVER_PID; exit 1; fi
+# Test object decoding from body
+echo "Testing POST /items"
+curl -s -X POST http://localhost:8001/items -H "Content-Type: application/json" -d '{"name": "test-item", "price": 10.5, "is_offer": true}' | grep '"name":"test-item"' | grep '"status":"created"'
+if [ $? -eq 0 ]; then echo "Object Decoding Success"; else echo "Object Decoding Failed"; kill $SERVER_PID; exit 1; fi
 
-# Test dependency injection
-echo "Testing /users/jules?token=jessica"
-curl -s "http://localhost:8001/users/jules?token=jessica" | grep '"user_id":"jules"' | grep '"token":"jessica"'
-if [ $? -eq 0 ]; then echo "Dependency Injection Success"; else echo "Dependency Injection Failed"; kill $SERVER_PID; exit 1; fi
+# Test DI and security (Failure)
+echo "Testing DI/Security Failure"
+curl -s http://localhost:8001/users/1 | grep "Invalid API Key"
+if [ $? -eq 0 ]; then echo "Security Failure Test Success"; else echo "Security Failure Test Failed"; kill $SERVER_PID; exit 1; fi
 
-# Test middleware header
-echo "Testing Middleware Header"
-curl -v -s http://localhost:8001/ 2>&1 | grep -i "X-Process-Time"
-if [ $? -eq 0 ]; then echo "Middleware Success"; else echo "Middleware Failed"; kill $SERVER_PID; exit 1; fi
+# Test DI and security (Success)
+echo "Testing DI/Security Success"
+curl -s http://localhost:8001/users/123 -H "X-API-Key: secret-token" | grep '"user_id":123' | grep '"authorized_by":"secret-token"'
+if [ $? -eq 0 ]; then echo "Security Success Test Success"; else echo "Security Success Test Failed"; kill $SERVER_PID; exit 1; fi
+
+# Test Exceptions
+echo "Testing Exception Handling"
+curl -s http://localhost:8001/error | grep "I am a teapot"
+if [ $? -eq 0 ]; then echo "Exception Handling Success"; else echo "Exception Handling Failed"; kill $SERVER_PID; exit 1; fi
 
 # Test Background Tasks
-echo "Testing /background"
-curl -s http://localhost:8001/background | grep "Background task scheduled"
+echo "Testing Background Tasks"
+curl -s -X POST http://localhost:8001/send-notification/test@example.com | grep "Notification scheduled"
 if [ $? -eq 0 ]; then echo "Background Tasks Success"; else echo "Background Tasks Failed"; kill $SERVER_PID; exit 1; fi
-sleep 2 # Wait for background task to finish and print
-
-# Test OpenAPI
-echo "Testing /openapi.json"
-curl -s http://localhost:8001/openapi.json | grep "Comprehensive NimFastAPI"
-if [ $? -eq 0 ]; then echo "OpenAPI Success"; else echo "OpenAPI Failed"; kill $SERVER_PID; exit 1; fi
+sleep 1
 
 kill $SERVER_PID
-echo "All tests passed!"
+echo "All comprehensive tests passed!"

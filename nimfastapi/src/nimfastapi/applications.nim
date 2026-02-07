@@ -1,8 +1,10 @@
-import asyncdispatch, asynchttpserver, strutils, sequtils, tables, json, macros
-import routing, requests, responses, openapi, dependencies, background
+import asyncdispatch, asynchttpserver, strutils, sequtils, tables, json, macros, times
+import routing, requests, responses, openapi, dependencies, background, exceptions, encoders, params
 
 type
   MiddlewareHandler* = proc (req: requests.Request, next: proc (req: requests.Request): Future[responses.Response] {.async, gcsafe.}): Future[responses.Response] {.async, gcsafe.}
+
+  ExceptionHandler* = proc (req: requests.Request, exc: ref Exception): Future[responses.Response] {.async, gcsafe.}
 
   FastAPI* = ref object
     router*: APIRouter
@@ -11,6 +13,7 @@ type
     openapi_url*: string
     docs_url*: string
     middlewares*: seq[MiddlewareHandler]
+    exception_handlers*: Table[string, ExceptionHandler]
 
 proc newFastAPI*(title: string = "FastAPI", version: string = "0.1.0", openapi_url: string = "/openapi.json", docs_url: string = "/docs"): FastAPI =
   FastAPI(
@@ -19,13 +22,17 @@ proc newFastAPI*(title: string = "FastAPI", version: string = "0.1.0", openapi_u
     version: version,
     openapi_url: openapi_url,
     docs_url: docs_url,
-    middlewares: @[]
+    middlewares: @[],
+    exception_handlers: initTable[string, ExceptionHandler]()
   )
 
 proc add_middleware*(self: FastAPI, handler: MiddlewareHandler) =
   self.middlewares.add(handler)
 
-proc add_route*(self: FastAPI, path: string, handler: RequestHandler, methods: seq[string] = @["GET"], parameters: seq[ParamInfo] = @[]) =
+proc add_exception_handler*(self: FastAPI, exc_class: typedesc, handler: ExceptionHandler) =
+  self.exception_handlers[$exc_class] = handler
+
+proc add_route*(self: FastAPI, path: string, handler: routing.RequestHandler, methods: seq[string] = @["GET"], parameters: seq[ParamInfo] = @[]) =
   let route = newRoute(path, handler, methods)
   if parameters.len > 0:
     route.parameters = parameters
@@ -48,7 +55,8 @@ proc getParamExtraction(req: NimNode, nameStr: string, typ: NimNode): NimNode =
     return quote do:
       `req`.json()
   else:
-    return quote do: `req`.pathParams.getOrDefault(`nameStr`, "")
+    return quote do:
+      decode_json[`typ`](`req`.json())
 
 proc resolveProcRecursive(req: NimNode, setupStmts: NimNode, handler: NimNode, btSym: NimNode): NimNode =
   let handlerType = handler.getTypeImpl
@@ -56,38 +64,55 @@ proc resolveProcRecursive(req: NimNode, setupStmts: NimNode, handler: NimNode, b
   if handlerType.kind == nnkProcTy:
     formalParams = handlerType[0]
   else:
-    formalParams = handler.getImpl.params
+    let impl = handler.getImpl
+    if impl.kind != nnkEmpty:
+      formalParams = impl.params
+    else:
+      return newCall(handler)
 
   var callArgs = newSeq[NimNode]()
 
-  for i in 1 .. formalParams.len - 1:
-    let identDefs = formalParams[i]
-    let typ = identDefs[^2]
-    let default = identDefs[^1]
+  if formalParams.len > 1:
+    for i in 1 .. formalParams.len - 1:
+      let identDefs = formalParams[i]
+      let typ = identDefs[^2]
+      let default = identDefs[^1]
 
-    for j in 0 .. identDefs.len - 3:
-      let name = identDefs[j]
-      let nameStr = $name
+      for j in 0 .. identDefs.len - 3:
+        let name = identDefs[j]
+        let nameStr = $name
 
-      if default.kind != nnkEmpty and (default.kind == nnkCall or default.kind == nnkCommand) and ($default[0] == "Depends"):
-        let depProc = default[1]
-        let depRes = genSym(nskLet, "depRes")
-        let depCall = resolveProcRecursive(req, setupStmts, depProc, btSym)
-        setupStmts.add(quote do:
-          let `depRes` = `depCall`
-        )
-        callArgs.add(depRes)
-      elif $typ == "Request":
-        callArgs.add(req)
-      elif $typ == "BackgroundTasks":
-        callArgs.add(btSym)
-      else:
-        let val = genSym(nskLet, "val")
-        let extract = getParamExtraction(req, nameStr, typ)
-        setupStmts.add(quote do:
-          let `val` = `extract`
-        )
-        callArgs.add(val)
+        var isDepends = false
+        var depProc: NimNode
+
+        if default.kind in {nnkCall, nnkCommand, nnkHiddenCallConv}:
+          let callNode = default[0]
+          if callNode.kind == nnkBracketExpr:
+            if $callNode[0] == "Depends":
+              isDepends = true
+              depProc = default[1]
+          elif $callNode == "Depends":
+            isDepends = true
+            depProc = default[1]
+
+        if isDepends:
+          let depRes = genSym(nskLet, "depRes")
+          let depCall = resolveProcRecursive(req, setupStmts, depProc, btSym)
+          setupStmts.add(quote do:
+            let `depRes` = `depCall`
+          )
+          callArgs.add(depRes)
+        elif $typ == "Request" or $typ == "requests.Request":
+          callArgs.add(req)
+        elif $typ == "BackgroundTasks":
+          callArgs.add(btSym)
+        else:
+          let val = genSym(nskLet, "val")
+          let extract = getParamExtraction(req, nameStr, typ)
+          setupStmts.add(quote do:
+            let `val` = `extract`
+          )
+          callArgs.add(val)
 
   result = newCall(handler)
   for arg in callArgs:
@@ -98,40 +123,37 @@ macro api_handler*(handler: typed): untyped =
   var setupStmts = newStmtList()
   let btSym = genSym(nskLet, "bt")
 
-  setupStmts.add(quote do:
-    let `btSym` = newBackgroundTasks()
-  )
-
   let callExpr = resolveProcRecursive(req, setupStmts, handler, btSym)
 
   result = quote do:
     proc (`req`: requests.Request): Future[responses.Response] {.async, gcsafe.} =
-      `setupStmts`
-
-      template callHandler(): untyped = `callExpr`
-
       var finalRes: responses.Response
-      when callHandler() is Future:
-        let res = await callHandler()
-        when res is JsonNode:
-          finalRes = JSONResponse(res)
-        elif res is responses.Response:
-          finalRes = res
-        else:
-          finalRes = newResponse($res)
-      else:
-        let res = callHandler()
-        when res is JsonNode:
-          finalRes = JSONResponse(res)
-        elif res is responses.Response:
-          finalRes = res
-        else:
-          finalRes = newResponse($res)
+      try:
+        let `btSym` = newBackgroundTasks()
+        `setupStmts`
 
-      await `btSym`.run()
+        var res: responses.Response
+        when compiles(await `callExpr`):
+          let rawRes = await `callExpr`
+        else:
+          let rawRes = `callExpr`
+
+        when typeof(rawRes) is JsonNode:
+          res = JSONResponse(rawRes)
+        elif typeof(rawRes) is responses.Response:
+          res = rawRes
+        else:
+          res = newResponse($rawRes)
+
+        finalRes = res
+        await `btSym`.run()
+      except HTTPException as e:
+        finalRes = JSONResponse(e.detail, e.status_code)
+      except Exception as e:
+        finalRes = JSONResponse(%*{"detail": e.msg}, Http500)
+
       return finalRes
 
-# Macros for decorators
 macro get*(self: FastAPI, path: static string, handler: typed): untyped =
   result = quote do:
     `self`.add_route(`path`, api_handler(`handler`), @["GET"])

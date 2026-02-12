@@ -7,10 +7,12 @@ type
     headers*: HttpHeaders
 
 proc newHTTPException*(status_code: HttpCode, detail: string, headers: HttpHeaders = newHttpHeaders()): HTTPException =
-  HTTPException(status_code: status_code, detail: %*{"detail": detail}, headers: headers)
+  result = HTTPException(status_code: status_code, detail: %detail, headers: headers)
+  result.msg = detail
 
 proc newHTTPException*(status_code: HttpCode, detail: JsonNode, headers: HttpHeaders = newHttpHeaders()): HTTPException =
-  HTTPException(status_code: status_code, detail: detail, headers: headers)
+  result = HTTPException(status_code: status_code, detail: detail, headers: headers)
+  result.msg = $detail
 
 type
   RequestValidationError* = ref object of HTTPException
@@ -19,7 +21,7 @@ type
 proc newRequestValidationError*(errors: JsonNode): RequestValidationError =
   RequestValidationError(
     status_code: Http422,
-    detail: %*{"detail": errors},
+    detail: errors,
     errors: errors,
     headers: newHttpHeaders()
   )

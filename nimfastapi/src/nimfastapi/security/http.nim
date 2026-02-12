@@ -1,32 +1,24 @@
-import ../requests, ../exceptions, asynchttpserver, strutils, base64
+import ../requests, ../exceptions, asynchttpserver, strutils, base64, asyncdispatch
 
 type
-  HTTPBase* = ref object of RootObj
-    scheme*: string
+  HTTPBasicCredentials* = object
+    username*: string
+    password*: string
 
-  HTTPBearer* = ref object of HTTPBase
-  HTTPBasic* = ref object of HTTPBase
-
-proc newHTTPBearer*(): HTTPBearer =
-  HTTPBearer(scheme: "bearer")
-
-proc newHTTPBasic*(): HTTPBasic =
-  HTTPBasic(scheme: "basic")
-
-proc get_token*(self: HTTPBearer, req: requests.Request): string =
-  let auth = req.httpReq.headers.getOrDefault("Authorization")
+proc HTTPBearer*(req: requests.Request): Future[string] {.async, gcsafe.} =
+  let auth = req.headers.getHeader("Authorization", "")
   if auth.startsWith("Bearer "):
     return auth[7 .. ^1]
-  return ""
+  raise newHTTPException(HttpCode(401), "Not authenticated")
 
-proc get_credentials*(self: HTTPBasic, req: requests.Request): tuple[user, password: string] =
-  let auth = req.httpReq.headers.getOrDefault("Authorization")
+proc HTTPBasic*(req: requests.Request): Future[HTTPBasicCredentials] {.async, gcsafe.} =
+  let auth = req.headers.getHeader("Authorization", "")
   if auth.startsWith("Basic "):
     try:
       let decoded = decode(auth[6 .. ^1])
       let parts = decoded.split(':', 1)
       if parts.len == 2:
-        return (parts[0], parts[1])
+        return HTTPBasicCredentials(username: parts[0], password: parts[1])
     except:
       discard
-  return ("", "")
+  raise newHTTPException(HttpCode(401), "Not authenticated")

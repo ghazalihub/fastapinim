@@ -1,4 +1,4 @@
-import json
+import json, options, macros, requests
 
 type
   ParamKind* = enum
@@ -11,6 +11,16 @@ type
     title*: string
     description*: string
     required*: bool
+    gt*: Option[float]
+    ge*: Option[float]
+    lt*: Option[float]
+    le*: Option[float]
+    min_length*: Option[int]
+    max_length*: Option[int]
+    regex*: string
+    example*: JsonNode
+    deprecated*: bool
+    include_in_schema*: bool = true
 
   QueryParam* = ref object of ParamBase
   PathParam* = ref object of ParamBase
@@ -20,31 +30,159 @@ type
   FormParam* = ref object of ParamBase
   FileParam* = ref object of ParamBase
 
-proc NewQuery*(default: JsonNode = newJNull(), alias: string = "", title: string = "", description: string = "", required: bool = false): QueryParam =
-  QueryParam(kind: pkQuery, default: default, alias: alias, title: title, description: description, required: required)
+# Converters to allow using markers as default values
+converter toString*(p: ParamBase): string = ""
+converter toInt*(p: ParamBase): int = 0
+converter toFloat*(p: ParamBase): float = 0.0
+converter toBool*(p: ParamBase): bool = false
+converter toJson*(p: ParamBase): JsonNode = newJNull()
+converter toUploadFile*(p: ParamBase): UploadFile = nil
 
-proc NewPath*(alias: string = "", title: string = "", description: string = ""): PathParam =
-  PathParam(kind: pkPath, default: newJNull(), alias: alias, title: title, description: description, required: true)
+proc NewQuery*(
+    default: JsonNode = newJNull(),
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = false,
+    gt: Option[float] = none(float),
+    ge: Option[float] = none(float),
+    lt: Option[float] = none(float),
+    le: Option[float] = none(float),
+    min_length: Option[int] = none(int),
+    max_length: Option[int] = none(int),
+    regex: string = "",
+    example: JsonNode = newJNull(),
+    deprecated: bool = false,
+    include_in_schema: bool = true
+): QueryParam =
+  QueryParam(
+    kind: pkQuery, default: default, alias: alias, title: title,
+    description: description, required: required, gt: gt, ge: ge,
+    lt: lt, le: le, min_length: min_length, max_length: max_length,
+    regex: regex, example: example, deprecated: deprecated,
+    include_in_schema: include_in_schema
+  )
 
-proc NewHeader*(default: JsonNode = newJNull(), alias: string = "", title: string = "", description: string = "", required: bool = false): HeaderParam =
-  HeaderParam(kind: pkHeader, default: default, alias: alias, title: title, description: description, required: required)
+# Use templates that return the actual NewQuery call
+template Query*(
+    default_val: untyped = nil,
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = false,
+    min_length: int = -1,
+    max_length: int = -1,
+    regex: string = ""
+): untyped =
+  NewQuery(
+    %default_val, alias, title, description, required,
+    min_length = (if min_length == -1: none(int) else: some(min_length)),
+    max_length = (if max_length == -1: none(int) else: some(max_length)),
+    regex = regex
+  )
 
-proc NewCookie*(default: JsonNode = newJNull(), alias: string = "", title: string = "", description: string = "", required: bool = false): CookieParam =
-  CookieParam(kind: pkCookie, default: default, alias: alias, title: title, description: description, required: required)
+# ... add others similarly
+proc NewPath*(
+    alias: string = "",
+    title: string = "",
+    description: string = ""
+): PathParam =
+  PathParam(kind: pkPath, alias: alias, title: title, description: description, required: true)
 
-proc NewBody*(default: JsonNode = newJNull(), alias: string = "", title: string = "", description: string = "", required: bool = true, embed: bool = false): BodyParam =
+template Path*(
+    alias: string = "",
+    title: string = "",
+    description: string = ""
+): untyped =
+  NewPath(alias, title, description)
+
+proc NewBody*(
+    default: JsonNode = newJNull(),
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = true
+): BodyParam =
   BodyParam(kind: pkBody, default: default, alias: alias, title: title, description: description, required: required)
 
-proc NewForm*(default: JsonNode = newJNull(), alias: string = "", title: string = "", description: string = "", required: bool = true): FormParam =
+template Body*(
+    default_val: untyped = nil,
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = true,
+    embed: bool = false
+): untyped =
+  NewBody(%default_val, alias, title, description, required)
+
+proc NewHeader*(
+    default: JsonNode = newJNull(),
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = true
+): HeaderParam =
+  HeaderParam(kind: pkHeader, default: default, alias: alias, title: title, description: description, required: required)
+
+template Header*(
+    default_val: untyped = nil,
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = true
+): untyped =
+  NewHeader(%default_val, alias, title, description, required)
+
+proc NewCookie*(
+    default: JsonNode = newJNull(),
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = true
+): CookieParam =
+  CookieParam(kind: pkCookie, default: default, alias: alias, title: title, description: description, required: required)
+
+template Cookie*(
+    default_val: untyped = nil,
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = true
+): untyped =
+  NewCookie(%default_val, alias, title, description, required)
+
+proc NewForm*(
+    default: JsonNode = newJNull(),
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = true
+): FormParam =
   FormParam(kind: pkForm, default: default, alias: alias, title: title, description: description, required: required)
 
-proc NewFile*(default: JsonNode = newJNull(), alias: string = "", title: string = "", description: string = "", required: bool = true): FileParam =
+template Form*(
+    default_val: untyped = nil,
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = true
+): untyped =
+  NewForm(%default_val, alias, title, description, required)
+
+proc NewFile*(
+    default: JsonNode = newJNull(),
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = true
+): FileParam =
   FileParam(kind: pkFile, default: default, alias: alias, title: title, description: description, required: required)
 
-template Query*(default: untyped = nil): untyped = NewQuery(%default)
-template Path*(): untyped = NewPath()
-template Header*(default: untyped = nil): untyped = NewHeader(%default)
-template Cookie*(default: untyped = nil): untyped = NewCookie(%default)
-template Body*(default: untyped = nil): untyped = NewBody(%default)
-template Form*(default: untyped = nil): untyped = NewForm(%default)
-template File*(default: untyped = nil): untyped = NewFile(%default)
+template File*(
+    default_val: untyped = nil,
+    alias: string = "",
+    title: string = "",
+    description: string = "",
+    required: bool = true
+): untyped =
+  NewFile(%default_val, alias, title, description, required)

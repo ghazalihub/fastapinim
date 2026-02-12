@@ -1,24 +1,45 @@
-import asyncdispatch, asynchttpserver, strutils, sequtils, tables
-import requests, responses
+import asyncdispatch, asynchttpserver, strutils, sequtils, tables, options
+import requests, responses, websockets
 
 type
   RequestHandler* = proc (req: requests.Request): Future[responses.Response] {.async, gcsafe.}
 
   ParamInfo* = object
     name*: string
-    kind*: string # "path", "query", "body"
+    kind*: string # "path", "query", "body", "header", "cookie"
     typ*: string # "string", "int", etc.
+    description*: string
+    required*: bool
+    default*: string
+    alias*: string
+    deprecated*: bool
+    # Validation
+    gt*: Option[float]
+    ge*: Option[float]
+    lt*: Option[float]
+    le*: Option[float]
+    min_length*: Option[int]
+    max_length*: Option[int]
+    regex*: string
 
   Route* = ref object
     path*: string
     methods*: seq[string]
     handler*: RequestHandler
+    wsHandler*: WebSocketHandler
+    isWebSocket*: bool
     pathParts*: seq[string]
     paramNames*: seq[string]
     parameters*: seq[ParamInfo]
+    tags*: seq[string]
+    summary*: string
+    description*: string
+    isMount*: bool
 
   APIRouter* = ref object
     routes*: seq[Route]
+    prefix*: string
+    tags*: seq[string]
 
 proc compilePath(path: string): (seq[string], seq[string]) =
   var pathParts: seq[string] = @[]
@@ -45,14 +66,30 @@ proc newRoute*(path: string, handler: RequestHandler, methods: seq[string] = @["
     handler: handler,
     pathParts: pathParts,
     paramNames: paramNames,
-    parameters: params
+    parameters: params,
+    isWebSocket: false
+  )
+
+proc newWebSocketRoute*(path: string, handler: WebSocketHandler): Route =
+  let (pathParts, paramNames) = compilePath(path)
+  Route(
+    path: path,
+    wsHandler: handler,
+    isWebSocket: true,
+    pathParts: pathParts,
+    paramNames: paramNames,
+    parameters: @[]
   )
 
 proc match*(self: Route, req: requests.Request): bool =
-  if req.httpMethod notin self.methods:
+  if not self.isMount and not self.isWebSocket and req.httpMethod notin self.methods:
     return false
 
-  let reqParts = req.httpReq.url.path.split('/').filterIt(it != "")
+  let path = req.httpReq.url.path
+  if self.isMount:
+    return path.startsWith(self.path)
+
+  let reqParts = path.split('/').filterIt(it != "")
   if reqParts.len != self.pathParts.len:
     return false
 
@@ -69,14 +106,14 @@ proc match*(self: Route, req: requests.Request): bool =
     req.pathParams[k] = v
   return true
 
-proc newAPIRouter*(): APIRouter =
-  APIRouter(routes: @[])
+proc newAPIRouter*(prefix: string = "", tags: seq[string] = @[]): APIRouter =
+  APIRouter(routes: @[], prefix: prefix, tags: tags)
 
 proc add_route*(self: APIRouter, path: string, handler: RequestHandler, methods: seq[string] = @["GET"]) =
   self.routes.add(newRoute(path, handler, methods))
 
 proc handle*(self: APIRouter, req: requests.Request): Future[responses.Response] {.async, gcsafe.} =
   for route in self.routes:
-    if route.match(req):
+    if not route.isWebSocket and route.match(req):
       return await route.handler(req)
   return newResponse("Not Found", Http404)

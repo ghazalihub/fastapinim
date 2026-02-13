@@ -1,0 +1,12 @@
+version       = "0.1.0"
+author        = "Jules"
+description   = "A FastAPI clone in Nim"
+license       = "MIT"
+srcDir        = "src"
+
+requires "nim >= 2.0.0"
+requires "zippy"
+requires "multipart"
+requires "checksums"
+requires "ws"
+requires "jwt"
